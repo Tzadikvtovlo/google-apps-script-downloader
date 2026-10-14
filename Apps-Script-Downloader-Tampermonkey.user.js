@@ -1,16 +1,14 @@
 // ==UserScript==
 // @name         Google Apps Script - הורדת קבצי הפרויקט
 // @namespace    https://mitmachim.top/user/לומדעס
-// @version      1.5
-// @description  הורדת קבצי GS, HTML והמניפסט ישירות מעורך Google Apps Script בלחיצה אחת
-// @author       לומדעס
+// @version      1.6
+// @description  הורדת קבצי GS, HTML והמניפסט ישירות מעורך Google Apps Script, כולל בחירת קבצים ופורמט שמירה
+// @author       לומדעס (שודרג)
 // @match        https://script.google.com/*
 // @run-at       document-idle
 // @icon         https://www.gstatic.com/script/apps_script_1x_48dp.png
 // @grant        none
 // @inject-into  page
-// @updateURL    https://raw.githubusercontent.com/6060cns-dotcom/google-apps-script-downloader/main/Apps-Script-Downloader-Tampermonkey.user.js
-// @downloadURL  https://raw.githubusercontent.com/6060cns-dotcom/google-apps-script-downloader/main/Apps-Script-Downloader-Tampermonkey.user.js
 // ==/UserScript==
 
 (()=>{
@@ -56,10 +54,10 @@ const discoverFiles = (panel) => {
     const old = result.get(name);
     if (!old || score < old.score) result.set(name, { el, score });
   }
-  return [...result].map(([name, x]) => ({ name, el: x.el, status: 'ממתין' }));
+  // הוספת שדה selected: true כברירת מחדל
+  return [...result].map(([name, x]) => ({ name, el: x.el, status: 'ממתין', selected: true }));
 };
 
-// גישה ישירה ל-Monaco Editor (פועל כי @grant none מזריק ישירות לעמוד)
 const monacoContexts = () => {
   const found = [];
   const visit = w => {
@@ -183,14 +181,12 @@ const downloadOne = (name, text) => {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 };
 
-// פתיחת חלונית ההורדה והרצת התהליך השלם בלחיצה אחת
 let isRunning = false;
-const startProcess = async () => {
-  if (isRunning) return;
-  isRunning = true;
+let globalFiles = []; // משתנה גלובלי לשמירת רשימת הקבצים
 
-  const old = document.getElementById('gas-downloader-panel');
-  if (old) old.remove();
+// פתיחת חלונית ההגדרות וההורדה
+const openDownloaderPanel = async () => {
+  if (document.getElementById('gas-downloader-panel')) return;
 
   // בניית חלונית בסגנון Material Design
   const panel = E('section', null, 'gas-downloader-panel', `
@@ -198,9 +194,9 @@ const startProcess = async () => {
     z-index: 2147483647;
     bottom: 75px;
     left: 20px;
-    width: 380px;
+    width: 400px;
     max-width: calc(100vw - 40px);
-    max-height: 480px;
+    max-height: 520px;
     display: flex;
     flex-direction: column;
     background: #ffffff;
@@ -222,79 +218,167 @@ const startProcess = async () => {
   closeBtn.onclick = () => { panel.remove(); isRunning = false; };
   header.append(title, closeBtn);
 
-  // Body
-  const top = E('div', null, null, 'padding: 12px 16px 8px;');
+  // הגדרות וכפתור הפעלה
+  const controlsDiv = E('div', null, null, 'padding: 12px 16px; background: #ffffff; border-bottom: 1px solid #dadce0; display: flex; justify-content: space-between; align-items: center; gap: 10px;');
+  
+  const formatSelect = E('select', null, null, 'padding: 6px; border: 1px solid #dadce0; border-radius: 4px; font-family: inherit; font-size: 12px; outline: none;');
+  const optOrig = E('option', 'פורמט מקורי (.gs/.html)'); optOrig.value = 'orig';
+  const optTxt = E('option', 'קובץ טקסט (.txt)'); optTxt.value = 'txt';
+  formatSelect.append(optOrig, optTxt);
+
+  const startBtn = E('button', 'הורד נבחרים', null, 'padding: 6px 16px; background: #1a73e8; color: #fff; border: none; border-radius: 4px; font-weight: 500; cursor: pointer; transition: background 0.2s;');
+  startBtn.onmouseover = () => { if(!isRunning) startBtn.style.background = '#1765cc'; };
+  startBtn.onmouseout = () => { if(!isRunning) startBtn.style.background = '#1a73e8'; };
+  
+  controlsDiv.append(formatSelect, startBtn);
+
+  // Status & Progress
+  const statusDiv = E('div', null, null, 'padding: 12px 16px 8px;');
   const stateEl = E('div', 'מאתר קבצים בפרויקט...', null, 'color: #3c4043; font-weight: 500; margin-bottom: 8px;');
   const track = E('div', null, null, 'height: 4px; background: #e8eaed; border-radius: 2px; overflow: hidden;');
-  const barEl = E('div', null, null, 'height: 100%; width: 5%; background: #1a73e8; transition: width 0.25s;');
+  const barEl = E('div', null, null, 'height: 100%; width: 0%; background: #1a73e8; transition: width 0.25s;');
   track.append(barEl);
-  top.append(stateEl, track);
+  statusDiv.append(stateEl, track);
 
-  const filesEl = E('div', null, null, 'flex: 1; overflow-y: auto; padding: 4px 16px 12px; max-height: 220px; display: flex; flex-direction: column; gap: 4px;');
+  // Select All Row
+  const selectAllDiv = E('div', null, null, 'padding: 6px 16px; display: flex; align-items: center; border-bottom: 1px solid #f1f3f4; background: #f8f9fa;');
+  const selectAllLabel = E('label', ' בחר הכל', null, 'display: flex; align-items: center; cursor: pointer; font-size: 12px; font-weight: 600; color: #3c4043;');
+  const selectAllCb = E('input', null, null, 'margin-left: 8px; cursor: pointer;');
+  selectAllCb.type = 'checkbox';
+  selectAllCb.checked = true;
+  selectAllLabel.prepend(selectAllCb);
+  selectAllDiv.append(selectAllLabel);
 
-  panel.append(header, top, filesEl);
+  // Files List
+  const filesEl = E('div', null, null, 'flex: 1; overflow-y: auto; padding: 4px 16px 12px; max-height: 200px; display: flex; flex-direction: column; gap: 4px;');
+
+  panel.append(header, controlsDiv, statusDiv, selectAllDiv, filesEl);
   (document.body || document.documentElement).appendChild(panel);
 
   const setProgress = (msg, val) => {
     stateEl.textContent = msg;
-    barEl.style.width = Math.max(2, Math.min(100, val)) + '%';
+    barEl.style.width = Math.max(0, Math.min(100, val)) + '%';
   };
 
-  const renderFiles = (files) => {
+  const renderFiles = () => {
     filesEl.textContent = '';
-    for (const f of files) {
-      const row = E('div', null, null, 'display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 4px 0; border-bottom: 1px dashed #f1f3f4;');
-      const name = E('span', f.name, null, 'direction: ltr; font-family: monospace; color: #202124;');
-      const status = E('span', f.status, null, `font-weight: 500; color: ${f.status.includes('הורד') ? '#137333' : f.status.includes('נכשל') ? '#d93025' : '#5f6368'};`);
-      row.append(name, status);
+    for (const f of globalFiles) {
+      const row = E('label', null, null, 'display: flex; justify-content: flex-start; align-items: center; font-size: 12px; padding: 4px 0; border-bottom: 1px dashed #f1f3f4; cursor: pointer;');
+      
+      const cb = E('input', null, null, 'margin-left: 8px;');
+      cb.type = 'checkbox';
+      cb.checked = f.selected;
+      cb.disabled = isRunning; // ננעל בזמן ריצה
+      cb.onchange = (e) => { 
+        f.selected = e.target.checked;
+        const allChecked = globalFiles.every(file => file.selected);
+        const noneChecked = globalFiles.every(file => !file.selected);
+        selectAllCb.checked = allChecked;
+        selectAllCb.indeterminate = !allChecked && !noneChecked;
+      };
+
+      const name = E('span', f.name, null, 'direction: ltr; font-family: monospace; color: #202124; flex: 1;');
+      const status = E('span', f.status, null, `font-weight: 500; font-size: 11px; color: ${f.status.includes('הורד') ? '#137333' : f.status.includes('נכשל') ? '#d93025' : '#5f6368'}; margin-right: 8px;`);
+      
+      row.append(cb, name, status);
       filesEl.append(row);
     }
   };
 
-  await sleep(250);
-  const files = discoverFiles(panel);
-  renderFiles(files);
+  selectAllCb.onchange = (e) => {
+    const isChecked = e.target.checked;
+    globalFiles.forEach(f => f.selected = isChecked);
+    renderFiles();
+  };
 
-  if (!files.length) {
-    setProgress('לא זוהו קבצים גלויים. פתח את סייר הקבצים בצד.', 0);
+  await sleep(250);
+  globalFiles = discoverFiles(panel);
+  renderFiles();
+
+  if (!globalFiles.length) {
+    setProgress('לא זוהו קבצים. ודא שהסייר פתוח.', 0);
+    return;
+  }
+  setProgress('בחר קבצים להורדה ולחץ "הורד נבחרים"', 0);
+
+  // פעולת ההורדה עצמה
+  startBtn.onclick = async () => {
+    if (isRunning) return;
+    const selectedFiles = globalFiles.filter(f => f.selected);
+    if (selectedFiles.length === 0) {
+      setProgress('לא נבחרו קבצים להורדה.', 0);
+      return;
+    }
+
+    isRunning = true;
+    startBtn.style.opacity = '0.5';
+    startBtn.style.cursor = 'not-allowed';
+    formatSelect.disabled = true;
+    selectAllCb.disabled = true;
+    renderFiles();
+
+    const collected = [];
+    const chosenFormat = formatSelect.value; // 'orig' או 'txt'
+
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const f = selectedFiles[i];
+      f.status = 'קורא תוכן...';
+      renderFiles();
+      setProgress(`קורא ומוריד (${i + 1}/${selectedFiles.length}): ${f.name}`, 10 + Math.round((i / selectedFiles.length) * 85));
+
+      const before = readMonaco('');
+      const beforeSig = before ? before.uri + '|' + before.value.length + '|' + before.value.slice(0, 60) : '';
+      const alreadySelected = isSelectedFile(f);
+
+      await activateFile(f, panel);
+      const result = await waitForContent(f.name, beforeSig, alreadySelected, panel);
+
+      if (result && result.value != null) {
+        collected.push({ name: f.name, text: result.value });
+        f.status = 'הורד בהצלחה ✓';
+        
+        // החלפת סיומת אם המשתמש בחר TXT
+        let downloadName = f.name;
+        if (chosenFormat === 'txt') {
+          downloadName = downloadName.replace(/\.(gs|html|json)$/i, '') + '.txt';
+        }
+        
+        downloadOne(downloadName, result.value);
+      } else {
+        f.status = 'קריאה נכשלה ✗';
+      }
+      renderFiles();
+      await sleep(350);
+    }
+
+    setProgress(`הסתיים! הורדו ${collected.length} מתוך ${selectedFiles.length} קבצים שנבחרו.`, 100);
+    barEl.style.background = '#137333';
     isRunning = false;
+    startBtn.style.opacity = '1';
+    startBtn.style.cursor = 'pointer';
+    formatSelect.disabled = false;
+    selectAllCb.disabled = false;
+    renderFiles();
+  };
+};
+
+// הוספת הכפתור הצף תוך בדיקת URL רציפה
+const addLauncherButton = () => {
+  // בדיקה אם אנחנו בעמוד עריכה או היסטוריה
+  const path = window.location.pathname;
+  const isTargetPage = path.endsWith('/edit') || path.endsWith('/projecthistory');
+  
+  const host = document.body || document.documentElement;
+  const existingBtn = document.getElementById('gas-downloader-launcher');
+
+  // אם אנחנו לא בעמוד המתאים, מסירים את הכפתור (אם הוא קיים) ויוצאים
+  if (!isTargetPage) {
+    if (existingBtn) existingBtn.remove();
     return;
   }
 
-  const collected = [];
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
-    f.status = 'קורא תוכן...';
-    renderFiles(files);
-    setProgress(`קורא ומוריד (${i + 1}/${files.length}): ${f.name}`, 10 + Math.round((i / files.length) * 75));
-
-    const before = readMonaco('');
-    const beforeSig = before ? before.uri + '|' + before.value.length + '|' + before.value.slice(0, 60) : '';
-    const alreadySelected = isSelectedFile(f);
-
-    await activateFile(f, panel);
-    const result = await waitForContent(f.name, beforeSig, alreadySelected, panel);
-
-    if (result && result.value != null) {
-      collected.push({ name: f.name, text: result.value });
-      f.status = 'הורד בהצלחה ✓';
-      downloadOne(f.name, result.value);
-    } else {
-      f.status = 'קריאה נכשלה ✗';
-    }
-    renderFiles(files);
-    await sleep(350);
-  }
-
-  setProgress(`הסתיים! הורדו ${collected.length} מתוך ${files.length} קבצים.`, 100);
-  barEl.style.background = '#137333';
-  isRunning = false;
-};
-
-// הוספת הכפתור הצף באופן עמיד (מוודא שהוא לעולם לא נעלם גם ברינדור מחדש של גוגל)
-const addLauncherButton = () => {
-  if (document.getElementById('gas-downloader-launcher')) return;
-  const host = document.body || document.documentElement;
+  // אם אנחנו בעמוד המתאים והכפתור כבר קיים, אין צורך להוסיף שוב
+  if (existingBtn) return;
   if (!host) return;
 
   const btn = E('button', null, 'gas-downloader-launcher', `
@@ -328,21 +412,21 @@ const addLauncherButton = () => {
   svg.setAttribute('fill', '#ffffff');
   svg.style.pointerEvents = 'none';
 
-  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-  path.setAttribute('d', 'M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z');
-  svg.appendChild(path);
+  const pathSvg = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  pathSvg.setAttribute('d', 'M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z');
+  svg.appendChild(pathSvg);
 
   const label = E('span', 'הורדת קוד', null, 'pointer-events: none;');
   btn.append(svg, label);
 
   btn.onmouseover = () => { btn.style.background = '#1765cc'; };
   btn.onmouseout = () => { btn.style.background = '#1a73e8'; };
-  btn.onclick = startProcess;
+  btn.onclick = openDownloaderPanel;
 
   host.appendChild(btn);
 };
 
-// בדיקה רציפה אחת לשנייה — מבטיח שהכפתור יחזור מיד גם אם גוגל מרנדרת מחדש את הדף
+// בדיקה רציפה אחת לשנייה 
 setInterval(addLauncherButton, 1000);
 addLauncherButton();
 
